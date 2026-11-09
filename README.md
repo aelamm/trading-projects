@@ -1,4 +1,4 @@
-# Exotics Trading — 3 Jupyter Projects + 3 Streamlit Applications
+# Trading projects
 
 ## Deliverables
 
