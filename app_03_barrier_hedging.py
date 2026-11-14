@@ -193,102 +193,39 @@ with t5:
     downloadable_frame(df,"equity_barrier_hedge_21_days.csv")
     st.warning("Model limitations: pricing assumes continuous barrier observation using Brownian bridges; realized simulation checks the stock at four intraday points. Greeks are finite differences with common random numbers; estimates near knockout can be unstable. Mid-pricing with proportional trading costs excludes explicit bid/ask spread, liquidity and barrier gap risk.")
 
-# Detailed source-aligned technical reference.
+
+# Concise technical reference; pricing and dashboard logic above is unchanged.
 with t6:
-    st.subheader("Model guide — Equity barrier pricing and dynamic hedging")
-    st.caption("The equations and implementation notes below describe the code actually deployed in engines/models.py, not a generic barrier-options model.")
-    with st.expander("1. Instrument, objective and assumptions", expanded=True):
-        render_model_guide(r"""
-**Goal.** Price a European **up-and-out call**, estimate its sampling uncertainty and Greeks, then simulate a short-option book hedged with stock and an optional vanilla call.
+    st.subheader("Model Guide | Equity Barrier Option")
+    st.caption("A quick explanation of the payoff, Monte Carlo pricing and daily hedge replay.")
 
-| Parameter | Implementation |
-|---|---|
-| $S_0$ | Underlying spot (default $100) |
-| $K$ | Strike (default $100) |
-| $B$ | Upper barrier (default $120) |
-| $T$ | Time to expiry (default 1 year) |
-| $r$ | Flat continuously compounded risk-free rate (default 2%) |
-| $\sigma$ | Constant annualized volatility (default 25%) |
-| Quantity | Negative short option position, default 1,000 options |
-| Price path | Risk-neutral lognormal GBM with no dividends |
-| Valuation monitoring | Continuous upper barrier (Brownian-bridge adjustment) |
-| Hedge replay | 21 trading days, one rebalance daily, four observed price substeps per day |
+    with st.expander("1. What is the option?", expanded=True):
+        st.markdown("""**Product:** European **up-and-out call**. It pays like a normal call at expiry **only if the stock never reaches the upper barrier**.
 
-The payout is
+- The option has no rebate after knock-out.
+- Inputs: spot, strike, upper barrier, maturity, rate and volatility.
+- The hedge simulator starts with a **short option position** and offsets exposure using stock and, optionally, vanilla calls.""")
+        st.latex(r"X=(S_T-K)^+\,\mathbf{1}_{\{\max_{0\le t\le T}S_t<B\}}")
 
-$$X=(S_T-K)^+\mathbf1_{\{\max_{0\le t\le T}S_t<B\}}.$$
+    with st.expander("2. How is the price calculated?"):
+        st.markdown("""- Simulate risk-neutral **geometric Brownian motion** with **63 time steps** and antithetic Monte Carlo paths.
+- Use **Brownian-bridge survival probabilities** to account for barrier hits between simulated endpoints.
+- Discount the average survival-weighted payoff. Display a Monte Carlo standard error and indicative **95% sampling interval**.""")
+        st.latex(r"\widehat V=e^{-rT}\frac1n\sum_{m=1}^n(S_T^{(m)}-K)^+w_m")
+        st.caption("The interval reflects Monte Carlo sampling, not future market returns; antithetic pairing is not fully reflected in its reported standard error.")
 
-The barrier is **knock-out**, not knock-in: a touch at or above $B$ extinguishes the option, without rebate. If $S_0\ge B$, the implementation returns zero price, zero Greeks and risk-neutral knock-out probability 100%.
+    with st.expander("3. Greeks and dynamic hedging"):
+        st.markdown("""- Estimate **delta, gamma and vega** with central finite differences using common random numbers.
+- Use a vanilla Black–Scholes call to hedge vega (optional), then hold stock to offset remaining delta.
+- Simulate **21 trading days**, rebalance once daily, subtract proportional transaction costs and track cumulative P&L.
+- The simulated realized barrier is checked at **four intraday observations per day**; pricing assumes continuous monitoring.""")
+        st.latex(r"\Delta\approx\frac{V(S+h)-V(S-h)}{2h}")
+        st.latex(r"H_C=-\frac{q\nu}{\nu_C},\qquad H_S=-q\Delta-H_C\Delta_C")
+        st.caption("q is the short exotic quantity, H_C the vanilla-call hedge and H_S the stock hedge; when vega hedging is off, H_C = 0.")
 
-Under risk-neutral pricing,
+    with st.expander("4. How to interpret the results"):
+        st.markdown("""**Read the dashboard:** *Price & confidence* shows the premium and Monte Carlo stability; *Barrier sensitivity* shows Greeks near knock-out; *Hedging desk* shows inventory and P&L; *Scenario analysis* shows spot/volatility stresses.
 
-$$V_0=\mathbb E^{\mathbb Q}[e^{-rT}X].$$
+**Check:** the option should be worth zero when spot is already at or above the barrier; it should not exceed the matching vanilla call; repeated seeds should give repeatable results.
 
-The underlying follows $dS_t=rS_tdt+\sigma S_tdW_t$ under the no-dividend assumptions. This is a **teaching model with synthetic prices**, not a live implied-volatility surface.
-""")
-    with st.expander("2. Antithetic Monte Carlo, Brownian bridge and price intervals"):
-        render_model_guide(r"""
-Lognormal path stepping for a simulation grid $\Delta t=T/M$ is
-
-$$S_{t+\Delta t}=S_t\exp[(r-\tfrac12\sigma^2)\Delta t+\sigma\sqrt{\Delta t}Z_t].$$
-
-The engine uses **63 time steps** and pairs each Gaussian path $Z$ with the antithetic path $-Z$. To approximate continuously observed knock-out from discretely sampled paths, it computes conditional **no-touch probability** on each segment with both endpoints below the barrier:
-
-$$p_j=1-\exp\left[-\frac{2\log(B/S_j)\log(B/S_{j+1})}{\sigma^2\Delta t}\right].$$
-
-If either endpoint is at or above $B$, $p_j=0$. The path-level weight is $w=\prod_j p_j$, leading to the conditional Monte Carlo estimator:
-
-$$\widehat V_0=e^{-rT}\frac1n\sum_{m=1}^n (S_T^{(m)}-K)^+w_m.$$
-
-The reported risk-neutral **knock-out estimate** is $1-\frac1n\sum_m w_m$; it is **not** the observed fraction knocked out during the subsequent 21-day hedge replay.
-
-The engine reports a price sampling standard error $s/\sqrt n$ and indicative confidence interval $\widehat V\pm1.96s/\sqrt n$ (lower price endpoint truncated to zero). **Caution:** because samples are antithetically paired, the formula does not account for pair covariance and should not be treated as a precisely calibrated 95% coverage guarantee. It also excludes model risk and hedging P&L uncertainty.
-""")
-    with st.expander("3. Spot Greeks, vega and vanilla hedge instrument"):
-        render_model_guide(r"""
-For option value $V(S,\sigma)$, price sensitivities are estimated using **common random shocks** across bumped scenarios:
-
-$$\Delta\approx\frac{V(S+h,\sigma)-V(S-h,\sigma)}{2h},\qquad
-\Gamma\approx\frac{V(S+h,\sigma)-2V(S,\sigma)+V(S-h,\sigma)}{h^2}.$$
-
-The spot bump is adapted to the **gap to the upper barrier**: nominal $h=\max(0.002S,0.01)$, capped at 20% of $B-S$, with a small floor. Vega is
-
-$$\nu\approx\frac{V(S,\sigma+u)-V(S,\max(0,\sigma-u))}{(\sigma+u)-\max(0,\sigma-u)},\quad u=\max(0.002,0.02\sigma).$$
-
-**Units:** delta is option-price change per $1 of spot; gamma per squared dollar; vega is price change per **1.00 (100 percentage points)** of volatility. To interpret vega for a 1-volatility-percentage-point move, divide by 100.
-
-The auxiliary hedge is a same-strike, same-residual-maturity **European vanilla call** priced with Black–Scholes (no dividend yield):
-
-$$d_1=\frac{\ln(S/K)+(r+\sigma^2/2)\tau}{\sigma\sqrt\tau},\quad d_2=d_1-\sigma\sqrt\tau,$$
-
-$$C=S\Phi(d_1)-Ke^{-r\tau}\Phi(d_2),\quad
-\Delta_C=\Phi(d_1),\quad \nu_C=S\phi(d_1)\sqrt\tau.$$
-
-For a short exotic inventory $q<0$, the model chooses vanilla-call quantity $H_C=-q\nu/\nu_C$ when vega hedging is enabled and $\nu_C$ is nonzero, followed by stock inventory $H_S=-q\Delta-H_C\Delta_C$. This hedges local first-order delta/vega, not jump or barrier gap risk.
-""")
-    with st.expander("4. Daily hedge replay, P&L and transaction costs"):
-        render_model_guide(r"""
-The simulation moves spot using **four GBM substeps per trading day**, checks the realized upper barrier at those four observations, and revalues the remaining position using $\tau=\max(T-t/252,1/252)$. Once a realized breach is observed, the exotic is zero in all subsequent daily marks.
-
-The hedge is **rebalanced once a day**; the prior day's holdings determine the mark-to-market profit and loss before the next rebalance:
-
-$$\mathrm{PnL}^{\mathrm{pretrade}}_t=q[V_t-V_{t-1}]+H_{S,t-1}(S_t-S_{t-1})+H_{C,t-1}(C_t-C_{t-1}).$$
-
-Trading costs use proportional **absolute traded notional**, with basis-point rate $b$:
-
-$$\mathrm{TC}_t=\frac{b}{10^4}\left(|H_{S,t}-H_{S,t-1}|S_t+|H_{C,t}-H_{C,t-1}|C_t\right).$$
-
-Therefore $\mathrm{PnL}^{\mathrm{net}}_t=\mathrm{PnL}^{\mathrm{pretrade}}_t-\mathrm{TC}_t$ and cumulative P&L is the sum of the net daily entries.
-
-The initial hedge formation incurs costs even though the mark-to-market P&L at day zero is zero. The app separately shows hedge inventories, cumulative P&L, and whether the simulated *realized* upper barrier was observed to be breached.
-""")
-    with st.expander("5. How to reproduce, verify and interpret the outputs"):
-        render_model_guide(r"""
-**Build sequence:** (1) input option terms; (2) generate seeded antithetic shocks; (3) simulate GBM endpoints; (4) calculate Brownian-bridge survival weights; (5) discount expected survival-weighted payoff; (6) compute finite-difference delta/gamma/vega using common shocks; (7) price the vanilla hedge analytically; (8) simulate 21 daily spot movements, revalue and rebalance; (9) accumulate trading costs and net P&L; (10) produce convergence plots, sensitivity scans and exported ledgers.
-
-**Validation ideas:** zero option value whenever initial spot is already beyond the upper barrier; barrier price between zero and comparable vanilla call price; no negative Monte Carlo option price; reproducibility with the same seed; price sensitivity to spot and volatility; cost-free replays should have zero turnover fees; hedging costs should rise when the configured bps rate increases (all else fixed).
-
-**Interpretation cautions:** price simulation intervals are *sampling* intervals, not prediction bands; path convergence is not a substitute for out-of-sample validation; finite-difference Greeks become sensitive to step size and sampling noise near the barrier; vanilla hedges do not span discontinuous knock-out exposure; the realized path's four daily observations miss intrastep barrier hits. No dividends, stochastic volatility, rates, jumps, transaction-level bid/ask, funding, liquidity, market impact or implied-volatility smile calibration are modeled.
-
-**Source code:** `engines/models.py` (`shocks`, `gbm_paths`, `bridge_survival`, `barrier_mc`, `barrier_greeks`, `vanilla_call`, `simulate_barrier_hedge`).
-""")
+**Limitations:** constant volatility, no dividends, no jumps, no volatility smile or market liquidity model. Finite-difference Greeks can be unstable near the barrier; delta–vega hedging cannot eliminate knock-out gap risk.""")

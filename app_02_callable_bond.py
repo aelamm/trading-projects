@@ -165,116 +165,40 @@ with t4:
     downloadable_frame(df,"callable_bond_risk_63_days.csv")
     st.warning("Educational additive short-rate tree, not issuer-specific OAS calibration. No issuer credit spread, funding, curve basis, swap carry, market impact or full revaluation of an actual swap. All simulated curve shocks are parallel.")
 
-# Detailed source-aligned technical reference.
+
+# Concise technical reference; pricing and dashboard logic above is unchanged.
 with t5:
-    st.subheader("Model guide — Callable bond pricing and rates hedging")
-    st.caption("Technical description checked against the implemented lattice and hedge simulator; model outputs use synthetic zero curves.")
-    with st.expander("1. Contract, curve conventions and trading objective", expanded=True):
-        render_model_guide(r"""
-**Goal.** Price an issuer-callable fixed-rate bond by **state-dependent optimal call exercise**, measure its sensitivity to zero-rate shifts, and simulate a first-order **pay-fixed swap proxy** hedge.
+    st.subheader("Model Guide | Callable Bond")
+    st.caption("A quick walkthrough of cash flows, the interest-rate tree and the hedge approximation.")
 
-| Model input | Meaning |
-|---|---|
-| Face | User-chosen dollar investment; quoted model price is per $100 face |
-| Coupon | User-chosen annual coupon percent on $100 par, paid semiannually |
-| Maturity / exercise | 10 years maturity; a single issuer call at **year 5** for $100 par |
-| Zero curve | Continuously compounded 1-, 5- and 10-year zero rates |
-| Intermediate zero rates | Linear interpolation, flat extrapolation at curve ends |
-| Rate volatility | User-selected additive short-rate tree displacement parameter |
-| Rate replay | 63 trading days with seeded parallel zero-rate changes |
+    with st.expander("1. What is the product?", expanded=True):
+        st.markdown("""**Bond:** 10-year fixed-rate bond paying coupons every **six months**, with one **issuer call at year 5** at par.
 
-A zero-coupon discount factor is obtained directly from the interpolated curve:
+- If the issuer calls, the investor receives the coupon and the redemption amount instead of future coupons.
+- This option benefits the **issuer**, so the callable bond is worth no more than the comparable non-callable bond under the same assumptions.
+- Dashboard prices are quoted **per $100 face value**; the sidebar face value scales dollar exposures.""")
+        st.latex(r"V_{\mathrm{callable}}=V_{\mathrm{bullet}}-V_{\mathrm{issuer\ option}}")
 
-$$P(0,T)=\exp[-z(T)T].$$
+    with st.expander("2. How is the bond priced?"):
+        st.markdown("""- Build a zero-rate curve from the **1Y, 5Y and 10Y** inputs and derive discount factors.
+- Calibrate a **20-step recombining additive short-rate lattice** (six-month intervals) to that curve.
+- Work backward through the tree: discount expected cash flows, add each coupon and, at year 5, apply the issuer's optimal call decision.""")
+        st.latex(r"P(0,T)=e^{-z(T)T}")
+        st.latex(r"V_{\mathrm{call},j}=c+\min\big(100,\mathrm{Continuation}_j\big)")
+        st.caption("Here c is the six-month coupon per $100 face. The call decision is applied before adding that day's coupon.")
 
-If the semiannual coupon amount is $c=C/2$ dollars per $100 par and dates are $t_k=k/2$, the matching **non-callable bullet price** is
+    with st.expander("3. Interest-rate risk and hedging"):
+        st.markdown("""- Reprice after **±1 basis-point parallel rate shifts** to estimate DV01; use the same bumps for effective duration and convexity.
+- Compare callable and non-callable price curves; callability can limit upside when rates fall.
+- Run a **63-day simulated rate scenario** and hedge first-order interest-rate risk with a dynamically sized **5-year pay-fixed swap proxy**.
+- Display hedged versus unhedged P&L and turnover costs.""")
+        st.latex(r"\mathrm{DV01}_{\$100}=\frac{V(z-1\,\mathrm{bp})-V(z+1\,\mathrm{bp})}{2}")
+        st.latex(r"N_{\mathrm{swap}}\approx\frac{\mathrm{DV01}_{\mathrm{bond}}}{A_5\times10^{-4}}")
+        st.caption("A₅ is the five-year fixed-leg discount annuity per dollar notional; the swap is an approximation, not fully priced separately.")
 
-$$V_{\mathrm{bullet}}=\sum_{k=1}^{20}cP(0,t_k)+100P(0,10).$$
+    with st.expander("4. How to interpret the results"):
+        st.markdown("""**Read the dashboard:** *Valuation* shows issuer option cost and price curves; *Curve & callability* shows the fitted input curve and call region; *Hedge performance* compares P&L; *Risk report* shows attribution and data.
 
-Because the issuer may redeem early, the holder's callable bond has a lower or equal model price (under these conventions):
+**Check:** the callable price should not exceed the bullet price; the issuer option value should not be negative; repeated seeds should reproduce the rate simulation.
 
-$$V_{\mathrm{callable}}=V_{\mathrm{bullet}}-V_{\mathrm{issuer\ call}}.$$
-
-The option cost in the dashboard is this **price difference**, not the market price of a separately tradable call option.
-""")
-    with st.expander("2. Calibrated recombining short-rate lattice and exercise"):
-        render_model_guide(r"""
-The implementation builds a **20-step recombining additive short-rate tree**, with $\Delta t=1/2$ year and equal risk-neutral transition probabilities. At time step $n$, state $j$ has short rate
-
-$$r_{n,j}=a_n+\sigma_r\sqrt{\Delta t}(2j-n),\qquad j=0,\ldots,n.$$
-
-The time-dependent center $a_n$ is chosen to reproduce the **market-implied discount factor** $P(0,t_{n+1})$. Let $Q_{n,j}$ denote the state price (present value weight) arriving at state $(n,j)$. Then
-
-$$P(0,t_{n+1})=\sum_j Q_{n,j}e^{-r_{n,j}\Delta t}.$$
-
-Writing $r_{n,j}=a_n+b_{n,j}$ yields the calibration identity
-
-$$a_n=-\frac1{\Delta t}\log\left[\frac{P(0,t_{n+1})}{\sum_j Q_{n,j}e^{-b_{n,j}\Delta t}}\right].$$
-
-State prices are advanced after discounting, with each node's discounted weight split equally between its two children.
-
-At maturity, the holder receives principal plus final coupon. Backward induction uses the discounted expected value of next-step bond values:
-
-$$\mathrm{Cont}_{n,j}=e^{-r_{n,j}\Delta t}\frac{V_{n+1,j}+V_{n+1,j+1}}2.$$
-
-At coupon dates, the coupon is added after discounting the continuation value. At the **year-5 call date only**, the issuer exercises if the continuation value exceeds the call redemption of $100:
-
-$$V_{\mathrm{call},j}=c+\min(100,\mathrm{Cont}_{\mathrm{call},j}).$$
-
-At other intermediate coupon dates $V_{n,j}=c+\mathrm{Cont}_{n,j}$; initial time zero has no immediate coupon. The final price is the value at the tree root. The dashboard's call-region state count is **not** an exercise probability.
-""")
-    with st.expander("3. Yield measures, DV01, duration and convexity"):
-        render_model_guide(r"""
-The bond's **yield to maturity (YTM)** is the scalar yield $y$ solving a semiannual compounded bullet-style yield equation for the **callable model price**:
-
-$$V_{\mathrm{callable}}=\sum_{k=1}^{20}\frac{c}{(1+y/2)^k}+\frac{100}{(1+y/2)^{20}}.$$
-
-**Yield to call (YTC)** solves the analogous equation over ten semiannual periods with $100$ redeemed at year five. These are conventional cash-flow IRRs based on hypothetical holding outcomes; **they do not incorporate a probabilistic call schedule**. The implementation does not separately calculate yield-to-worst.
-
-The rate sensitivities come from **full repricing** at parallel shifts of **plus and minus 1 basis point**, where $1\text{ bp}=10^{-4}$:
-
-$$\mathrm{DV01}_{\$100}=\frac{V(z-1\mathrm{bp})-V(z+1\mathrm{bp})}{2}.$$
-
-The quantity is in **dollars per one-basis-point shift per $100 face**; it is generally positive for a long bond. The effective modified-duration proxy is
-
-$$D_{\mathrm{eff}}=\frac{\mathrm{DV01}_{\$100}}{V_0(10^{-4})}.$$
-
-The implemented effective convexity is
-
-$$\mathcal C_{\mathrm{eff}}=\frac{V_-+V_+-2V_0}{V_0(10^{-4})^2}.$$
-
-Issuer callability can reduce upside price sensitivity as rates fall and may produce **negative convexity in some rate regions**. The model does **not** compute bucketed/key-rate DV01 or issuer-specific spread duration.
-""")
-    with st.expander("4. Pay-fixed swap proxy and simulated P&L"):
-        render_model_guide(r"""
-Every simulated day, the three input zero rates receive the same accumulated stochastic shift. The daily shocks are seeded Gaussian draws with the user-selected basis-point standard deviation; zero yields are floored at a small positive value in the replay.
-
-A 5-year semiannual **discount annuity per dollar notional** is computed as
-
-$$A_5=\sum_{k=1}^{10}\tfrac12 P(0,k/2).$$
-
-The model treats the **5-year zero rate** as a *proxy* for a 5-year swap rate and uses the bond's face-scaled DV01 to choose pay-fixed exposure:
-
-$$\mathrm{DV01}_{\mathrm{bond},\$}=\mathrm{DV01}_{\$100}\frac{\mathrm{face}}{100},\qquad
-N_{\mathrm{swap}}=\frac{\mathrm{DV01}_{\mathrm{bond},\$}}{A_5(10^{-4})}.$$
-
-For a pay-fixed swap proxy, the model attributes daily hedge P&L from **yesterday's notional** to the change in 5-year rate:
-
-$$\mathrm{PnL}^{\mathrm{swap}}_t=N_{t-1}A_{5,t}(z_{5,t}-z_{5,t-1}).$$
-
-Bond P&L is daily price change times face divided by 100. Simulated net daily P&L is
-
-$$\mathrm{PnL}^{\mathrm{net}}_t=\mathrm{PnL}^{\mathrm{bond}}_t+\mathrm{PnL}^{\mathrm{swap}}_t-\frac{b}{10^4}|N_t-N_{t-1}|.$$
-
-The swap P&L is a **local duration/annuity approximation**, not an independently valued swap with full fixed/floating cash flows, carry or margin. The hedge is designed for approximately parallel interest-rate movements; it is not a curve-shape hedge.
-""")
-    with st.expander("5. Model-building walkthrough, tests and limitations"):
-        render_model_guide(r"""
-**Implementation sequence:** (1) construct and interpolate the zero curve; (2) compute discount factors; (3) propagate risk-neutral state prices and calibrate the additive short-rate center at every date; (4) value the bond backward with the issuer's year-5 exercise rule; (5) compute YTM and YTC; (6) bump the entire curve for DV01, duration and convexity; (7) replay 63 parallel-rate shocks, reprice and rebalance the swap proxy; (8) accumulate bond, proxy-hedge and trading-cost P&L; (9) export the ledger.
-
-**Consistency checks:** discount factors matched by lattice calibration; callable price should not exceed the corresponding bullet price; issuer option cost should be nonnegative under consistent inputs; down/up shock prices should be finite; if exercise is never optimal, callable and non-callable prices should be close; simulated P&L should reproduce with the same seed. Check that the issuer exercise condition uses **continuation before adding that date's coupon**.
-
-**What the model omits:** issuer default/credit spreads and OAS calibration; stochastic curve shapes and volatility term structure; negative-rate realism, stochastic spread dynamics and exercise behavior beyond one call date; full swap valuation, accrual/coupon carry, financing, funding, curve basis, bid/ask, margin and liquidity. The short-rate lattice is an educational calibrated additive tree, **not a production Hull–White calibration**.
-
-**Source code:** `engines/models.py` (`zero_rate`, `zero_discount`, `bond_ytm`, `callable_bond`, `bond_risk`, `simulate_callable`).
-""")
+**Limitations:** one call date, educational additive lattice, no issuer credit or OAS calibration, no key-rate hedging and no full swap cash-flow/mark-to-market engine. YTM and YTC describe hypothetical cash-flow outcomes, **not predicted exercise**.""")

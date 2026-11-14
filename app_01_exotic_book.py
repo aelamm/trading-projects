@@ -166,107 +166,40 @@ with t5:
     downloadable_frame(df,"commodity_exotics_daily_book.csv")
     st.markdown("**Model boundaries:** Synthetic correlated GBM markets; rainbow payoff is based on maximum percentage return, not maximum absolute asset price. Brownian bridge prices a continuously monitored upper barrier, while the simulated realized hedge path checks oil at four intraday steps. Portfolio P&L excludes financing, bid/ask asymmetry and liquidity risk beyond configured transaction costs.")
 
-# Detailed source-aligned technical reference.
+
+# Concise technical reference; pricing and dashboard logic above is unchanged.
 with t6:
-    st.subheader("Model guide — Commodity exotic trading book")
-    st.caption("Technical documentation of the actual educational implementation in engines/models.py. Synthetic prices and paths; no live market feeds.")
-    with st.expander("1. Desk mandate, product definitions and conventions", expanded=True):
-        render_model_guide(r"""
-**Objective.** Simulate a short book containing an oil **up-and-out call** and a three-commodity **best-of percentage-return rainbow call** on oil, gold and copper; compute marks and finite-difference Greeks; hedge exposures daily; examine a volatility shock and staged unwind.
+    st.subheader("Model Guide | Commodity Exotic Trading Book")
+    st.caption("A quick explanation of the products, pricing, hedging and limitations. Synthetic markets; not live trading.")
 
-| Convention | Implementation |
-|---|---|
-| Oil initial level / barrier option strike | $78 per barrel / $78 |
-| Oil upper knock-out barrier | User-selected (default $100 per barrel) |
-| Gold / copper starting levels | $2,650 per ounce / $4 per pound |
-| Annualized starting volatilities | Oil 25%, gold 15%, copper 20% |
-| Risk-free rate | Flat, continuously compounded 2% |
-| Rainbow reference levels | Fixed at the initial oil, gold and copper levels |
-| Rainbow note payout notional | User-selected, default $100,000 per note |
-| Oil contract multiplier | 1,000 barrels per contract |
-| Position convention | Negative contracts = short exotic liability |
-| Trading experiment | 21 business-day changes plus day 0; 252 days/year |
+    with st.expander("1. What is being traded?", expanded=True):
+        st.markdown("""**Book:** short oil up-and-out calls and short best-of rainbow calls linked to **oil, gold and copper**.
 
-The **oil call payoff for an unbreached upper barrier** is
-
-$$X_B=(S_T-K)^+\,\mathbf 1_{\{\max_{0\le t\le T}S_t<B\}}.$$
-
-The **rainbow note** is normalized by the *original* reference prices, rather than choosing the largest absolute commodity price:
-
-$$X_R=N\left(\max_{i\in\{1,2,3\}}\left[\frac{S_{i,T}}{S_{i,0}^{\mathrm{ref}}}-1\right]\right)^+.$$
-
-Both positions are marked in USD, but **oil option marks must be multiplied by 1,000 barrels per contract**; rainbow marks are already dollars per note. The app reports Greeks per product/note rather than automatically interpreting them as net book Greeks.
+- **Oil barrier call:** pays the positive difference between oil price and strike only if oil never touches the upper barrier.
+- **Rainbow call:** pays on the highest *percentage return* of the three commodities relative to their original reference prices.
+- One oil option contract represents **1,000 barrels**; each rainbow note has a configurable USD notional.
 """)
-    with st.expander("2. Simulated market dynamics, correlation and Monte Carlo"):
-        render_model_guide(r"""
-Each commodity follows a **risk-neutral geometric Brownian motion** with constant annual volatility between scenario changes:
+        st.latex(r"X_B=(S_T-K)^+\,\mathbf{1}_{\{\max_{0\le t\le T}S_t<B\}}")
+        st.latex(r"X_R=N\left(\max_i\left[\frac{S_{i,T}}{S_{i,0}^{\mathrm{ref}}}-1\right]\right)^+")
 
-$$\frac{dS_i}{S_i}=(r-q_i)dt+\sigma_i\,dW_i,\qquad q_i=0.$$
+    with st.expander("2. How are prices calculated?"):
+        st.markdown("""- Simulate **63-step correlated geometric Brownian-motion paths** for the three commodities using Cholesky decomposition and antithetic shocks.
+- Apply **Brownian-bridge survival weights** to price a continuously monitored upper barrier, including crossings between simulated dates.
+- Average each payoff and discount it at the flat risk-free rate. Reuse seeded random shocks for reproducible risk estimates.""")
+        st.latex(r"\widehat V=e^{-rT}\frac{1}{n}\sum_{m=1}^{n}\text{payoff}_m\,w_m")
+        st.caption("For the rainbow option, the survival weight is 1: it has no barrier.")
 
-A discrete simulation step is
+    with st.expander("3. Greeks, hedging and P&L"):
+        st.markdown("""- **Delta and vega:** reprice after small spot or volatility bumps; **cross-gamma** measures interactions between two commodity prices.
+- Rebalance **oil, gold and copper delta hedges daily**. An optional vanilla oil call provides an imperfect proxy for the portfolio's combined volatility exposure.
+- Record daily changes in exotic marks and hedge values, then subtract turnover-based transaction costs.
+- Apply the chosen volatility shock and, if the modeled threshold is breached, **unwind short exotic positions over five sessions**.""")
+        st.latex(r"\Delta_i\approx\frac{V(S_i+h)-V(S_i-h)}{2h}")
+        st.latex(r"\mathrm{PnL}_t=\Delta V_{\mathrm{exotics},t}+\Delta V_{\mathrm{hedges},t}-\mathrm{costs}_t")
 
-$$S_{i,t+\Delta t}=S_{i,t}\exp\left[(r-\tfrac12\sigma_i^2)\Delta t+\sigma_i\sqrt{\Delta t}Z_{i,t}\right].$$
+    with st.expander("4. How to interpret the results"):
+        st.markdown("""**Read the dashboard:** *Overview* tracks simulated P&L; *Positions & prices* shows positions and underlying moves; *Greeks & hedges* shows sensitivities and inventories; *Stress & unwind* shows volatility shocks and risk reduction.
 
-Three correlated normals are obtained by Cholesky factorization: if $LL^\top=C$, then $Z^{\mathrm{corr}}=LZ$, where $C$ is the equicorrelation matrix with user-set off-diagonal correlation $\rho$. The model requires this matrix to be **positive definite**.
+**Check:** unchanged seeds should reproduce results; a knocked-out oil call must be worth zero; a barrier call should not exceed its matching vanilla call.
 
-The pricing engine uses **63 time steps** and **antithetic Gaussian shocks**: for each sampled $Z$, it also runs $-Z$. The same seeded shock matrix is reused for bumped prices, reducing simulation noise in finite-difference Greeks. This is a **synthetic scenario generator**, not calibrated historical commodity-market data.
-
-For the continuously observed oil upper barrier, the simulation weights surviving endpoint intervals using a **Brownian-bridge conditional no-hit probability**:
-
-$$p_{\mathrm{surv},j}=1-\exp\left[-\frac{2\log(B/S_j)\log(B/S_{j+1})}{\sigma^2\Delta t}\right]$$
-
-when both endpoints are below $B$ (zero otherwise). The **path survival weight** is $w=\prod_j p_{\mathrm{surv},j}$, and the oil call mark is
-
-$$\widehat V_B=e^{-rT}\frac1n\sum_{m=1}^n(S_T^{(m)}-K)^+w_m.$$
-
-The rainbow Monte Carlo mark is likewise $e^{-rT}$ times the average rainbow payoff. There is no barrier on the rainbow note.
-""")
-    with st.expander("3. Greeks, cross-gamma and hedge construction"):
-        render_model_guide(r"""
-Greeks are computed using **central price bumps with common random numbers**:
-
-$$\Delta_i\approx\frac{V(S_i+h_i)-V(S_i-h_i)}{2h_i},\qquad
-\Gamma_i\approx\frac{V(S_i+h_i)-2V(S_i)+V(S_i-h_i)}{h_i^2}.$$
-
-For the rainbow, $h_i=0.5\%\times S_i$. The oil barrier Greek bump is approximately $0.2\%$ of spot, limited to 20% of the gap to the upper barrier (and subject to small minimum thresholds). These step sizes are implementation choices, not analytical identities.
-
-The rainbow **oil–gold cross-gamma** (one example of the cross-asset interactions) is
-
-$$\Gamma_{ij}\approx\frac{V_{++}-V_{+-}-V_{-+}+V_{--}}{4h_i h_j}.$$
-
-Oil barrier vega is a finite difference in oil volatility. Rainbow **parallel vega** bumps all three commodity volatilities by $\pm 0.005$ together; it is *not* a separate oil/gold/copper vega vector.
-
-Daily target hedge inventory for each commodity $i$ is
-
-$$H_i=-\left(q_B\,1000\,\Delta_{B,i}+q_R\Delta_{R,i}\right)-\mathbf1_{i=\mathrm{oil}}H_C\Delta_C,$$
-
-where the oil barrier has delta only to oil, and $H_C$ is the quantity of a **vanilla oil call** used as a *parallel-vega proxy*:
-
-$$H_C=-\frac{q_B\,1000\,\nu_B+q_R\nu_R^{\mathrm{parallel}}}{\nu_C}.$$
-
-$H_C$ is set to zero when the toggle is off or the vanilla vega is near zero. A single oil call cannot precisely hedge the three underlying-specific volatility sensitivities or correlation risk.
-""")
-    with st.expander("4. P&L ledger, costs, spike and unwind"):
-        render_model_guide(r"""
-At day $t$, **yesterday's positions** are revalued *before* hedge rebalancing and any unwind:
-
-$$\Delta\Pi_t=q_{B,t-1}\,1000\,\Delta V_{B,t}+q_{R,t-1}\Delta V_{R,t}+\sum_i H_{i,t-1}\Delta S_{i,t}+H_{C,t-1}\Delta C_t-\mathrm{TC}_t.$$
-
-Transaction fees are proportional to **absolute hedge turnover marked at current prices**, including changes in exotic inventories and vanilla hedge quantity:
-
-$$\mathrm{TC}_t=\frac{b}{10^4}\left[\sum_i |\Delta H_i|S_i+|\Delta q_B|\,1000\,V_B+|\Delta q_R|V_R+|\Delta H_C|C\right].$$
-
-A volatility multiplier applies to **all three** market volatilities on and after the selected shock day. If the highest simulated volatility then exceeds **30%**, the short exotic positions are reduced linearly over **five sessions** starting on the shock day. Hedging inventory is re-targeted each day.
-
-The realized oil path is checked at **four intraday substeps per hedge day**, whereas valuation assumes continuous monitoring through the bridge calculation. Thus the realized knock-out indicator and risk-neutral knock-out probability are not interchangeable.
-""")
-    with st.expander("5. Build sequence, validation and limitations"):
-        render_model_guide(r"""
-**Reconstructing the application:** (1) define product terms and positions; (2) generate seeded correlated GBM shocks; (3) evaluate barrier and rainbow payoffs; (4) use common random numbers for Greeks; (5) construct stock and optional vanilla-call hedge inventories; (6) move the synthetic market forward; (7) mark previous inventories, apply turnover costs, and update positions; (8) record a row of the simulated ledger; (9) chart and export results.
-
-**Useful validation checks:** a knocked-out oil call must price at zero; an up-and-out call must not exceed a matched vanilla call under the same assumptions; correlation matrices must be positive definite; the rainbow note should respond to correlation and cross-gamma; P&L should be reproducible when the seed is unchanged; displayed option prices must be scaled to their product units when forming book P&L.
-
-**Scope:** no empirical volatility surfaces, commodity seasonality, jumps, stochastic rates, convenience yields, funding/carry, credit, order-book execution, bid/ask asymmetry, cross-vega hedge, correlation hedge or market-impact model. The scenario is a teaching simulation, **not a production trading system**. The model's option-price Monte Carlo sampling uncertainty is not an estimate of hedging risk, VaR or P&L forecast accuracy.
-
-**Source code:** `engines/models.py` (`shocks`, `gbm_paths`, `bridge_survival`, `barrier_mc`, `rainbow_mc`, `barrier_greeks`, `rainbow_greeks`, `simulate_book`).
-""")
+**Limitations:** synthetic constant-volatility markets, no smile calibration or observed commodity term structures. The oil-call hedge cannot eliminate separate commodity vegas or correlation risk. Transaction costs are simplified; results are **not live or historical trading performance**.""")
